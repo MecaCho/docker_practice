@@ -21,7 +21,7 @@ sys.setdefaultencoding('utf-8')
 NODEIP = "162.3.210.32"
 MASTERIP = "139.159.246.115"
 ETHNAME = "eno16777984"
-cx = sqlite3.connect('test0811.db')
+cx = sqlite3.connect('test0812.db')
 cu = cx.cursor()
 
 def createlog(name=__name__,log_file_name = 'test.log',debug=[],info=[],warn= [],error= [],fetal=[]):
@@ -79,10 +79,15 @@ def insertResult(DBtable,info):
         cx.commit()
         #cx.close()
     except Exception as error_Message:
-        createlog(name= '__insertResult__',error=['databaseError',error_Message])
+        createlog(name= '__insertResult__',error=['databaseError',DBtable,error_Message])
 
 def calTime(time0,time1):
     return str(datetime.strptime(time1,"%H:%M:%S")-datetime.strptime(time0,"%H:%M:%S"))
+def search_str(targetList,aimStr,loc=0):
+    result = []
+    for i in xrange(len(targetList)):
+        if aimStr == targetList[i]:result.append(targetList[i+loc])
+    return result
 
 
 def shell_exc(commands):
@@ -116,19 +121,29 @@ def createPod(masterIP,podNum=1,rcName='nginx'):
     checkInfo = shell_exc("kubectl -s http://"+masterIP+":8080 get pod -o wide")
     while checkInfo:
         checkInfo = shell_exc("kubectl -s http://"+masterIP+":8080 get pod -o wide")
+        shell_exc("kubectl -s http://"+masterIP+' delete pods --all')
         print checkInfo
         time.sleep(2)
     shell_exc("kubectl -s http://"+masterIP+":8080 "+"scale rc "+rcName+" --replicas="+str(podNum))
-    podStatus = checkPodStatus()
+    podStatusInfo = filter(lambda x:x!="Running",get_podStatus(MASTERIP,NODEIP))
+    while podStatusInfo:
+        if filter(lambda x:x=="ImagePullBackOff",get_podStatus(MASTERIP,NODEIP)):
+            stdout = shell_exc("kubectl -s http://"+masterIP+":8080 get pod -o wide")
+            podName = search_str(stdout,"ImagePullBackOff",loc=-2)
+            optemp_ = "kubectl -s http://"+masterIP+":8080 delete pods "+podName[0]
+            createlog(name='createPods',info=[optemp_])
+            shell_exc(optemp_)
+        podStatusInfo = filter(lambda x:x!="Running",get_podStatus(MASTERIP,NODEIP))
+    '''podStatus = checkPodStatus()
     print podStatus
     count = 100
     while podStatus!="Running" and count:
         allpodStatus = checkPodStatus()
         print allpodStatus
         count -= 1
-    return "All Pods Running..."
+    return "All Pods Running..."'''
 
-def set_podStatus(masterIP):
+def set_podStatus(masterIP,nodeIP = NODEIP):
     op0 = "kubectl -s http://"+masterIP+":8080 get pod -o wide"
     stdout = shell_exc(op0)
     deleteDB("podStatus")
@@ -165,7 +180,15 @@ def get_nodeStatus(masterIP,nodeIP):
         print traceback.format_exc()
         return None
 
-
+def get_podStatus(masterIP,nodeIP):
+    stdout = shell_exc("kubectl -s http://"+masterIP+":8080 get pod -o wide")
+    result = []
+    try:
+        result = search_str(stdout,nodeIP,loc=-4)
+        print nodeIP,result,time.strftime("%c")
+    except:
+        print "get_podStatusError",traceback.format_exc()
+    return result
 
 def tc_control(eth_name,args):
     print "Network reset..."
@@ -202,19 +225,20 @@ def ssh2(ip='162.3.210.32',username='root',passwd='huawei',commands=[]):
     client.close()
 
 def testK8sNetwork(func1='delay',func2="200ms",podNum=1,netControlSwitch = 1):
-    timeInfo = [func2]
     print "Begin......"
     if netControlSwitch:
         tc_control(ETHNAME,func1+' '+func2)
+        timeInfo = [func2]
     else:
         wondershaper_control(ETHNAME,downloadBandwidth=func1,uploadBandwidth=func2)
-        timeInfo[0]=[func1+'/'+func2]
+        timeInfo=[func1+'/'+func2]
     nodeStatus = get_nodeStatus(masterIP=MASTERIP,nodeIP=NODEIP)
     shell_exc("systemctl start kubelet")
     shell_exc("systemctl stop kubelet")
     startTime = time.time()
     while nodeStatus=="Ready":
         #print "%s\t%s"%(NODEIP,nodeStatus)
+        time.sleep(10)
         nodeStatus = get_nodeStatus(masterIP=MASTERIP,nodeIP=NODEIP)
     endTime = time.time()
     durTime = round(endTime-startTime,2)
@@ -225,33 +249,66 @@ def testK8sNetwork(func1='delay',func2="200ms",podNum=1,netControlSwitch = 1):
     durTime1 = round(time.time()-endTime,2)
     timeInfo.append(str(durTime))
     timeInfo.append(str(durTime1))
+    ########################createPod()创建pod并且保证所有pod成功创建，状态为Running
     createPod(MASTERIP,podNum=podNum,rcName="nginx")
-    allPodLostTime = set_podStatus(MASTERIP)
+    ###################set_podStatus()将所有podz状态写入数据库，对其中状态为Running的pod,备注其创建时间，该函数返回对应NODEIP的pod创建时间
+    set_podStatus(MASTERIP)
+    allPodLostTime = []
+    cu.execute("select CreatePodTime from podStatus where NODE=="+'"'+NODEIP+'"')
+    for file in cu.fetchall():
+        createlog(name='search NODEIPs createdPod Time',info=[file])
+        allPodLostTime.append(file[0])
+
     createlog(name="createPodTimeDetail",log_file_name='createPod.log',info=[func1,func2,podNum,allPodLostTime])
     print allPodLostTime
     if allPodLostTime:
-        totalTime = reduce(lambda x,y:x+y,map(lambda x:datetime.strptime(x,"%H:%M:%S")-datetime.strptime("0:0:0","%H:%M:%S"),allPodLostTime))
-        avgTime = (datetime.strptime(str(totalTime),"%H:%M:%S")-datetime.strptime("0:0:0","%H:%M:%S"))/podNum
-        timeInfo.append(str(avgTime))
+        if len(allPodLostTime)>1:
+            timeinfo = []
+            totalTime = reduce(lambda x,y:x+y,map(lambda x:datetime.strptime(x,"%H:%M:%S")-datetime.strptime("0:0:0","%H:%M:%S"),allPodLostTime))
+            avgTime = (datetime.strptime(str(totalTime),"%H:%M:%S")-datetime.strptime("0:0:0","%H:%M:%S"))/podNum
+            timeinfo.append(avgTime)
+            maxTime = max(allPodLostTime)
+            timeinfo.append(maxTime)
+            minTime = min(allPodLostTime)
+            timeinfo.append(minTime)
+            detailTime ='('+ '*'.join(allPodLostTime)+')'
+            timeinfo.append(detailTime)
+            timeInfo.append('$$'.join(timeinfo))
+        else:
+            timeInfo.append('*'.join(allPodLostTime))
     else:
        timeInfo.append('CreatePodFailed')
-    print timeInfo
+    print 'TimeInfo:',timeInfo,"#################"
     return timeInfo
 
 if __name__=='__main__':
     cmd = ['kubectl -s http://139.159.246.115:8080 get node -o wide','ls -l']
-    #################test delay
-    '''createDB("netDelay",'delayTime(ms)','ReadyToNotReady(s)','NotReadyToReady(s)','CreatePodTime','sysTime')
-    for i in xrange(50,1500,50):
-        timeInfo = testK8sNetwork(func1='delay',func2=str(i)+'ms')
-        insertResult("netDelay",timeInfo)
-    #################################################
-    createDB("netLoss",'delayTime(ms)','ReadyToNotReady(s)','NotReadyToReady(s)','CreatePodTime(10)','sysTime')
-    for i in xrange(0,50,5):
-        timeInfo = testK8sNetwork(func1='loss',func2=str(i)+'%',podNum=10)
-        insertResult("netLoss",timeInfo)
+    for podnum in xrange(2,10,2):
+        try:
+            createDB("Bandwith",'Bandwith(upload/download)','ReadyToNotReady(s)','NotReadyToReady(s)','CreatePodTime','sysTime')
+            for i in xrange(100,1500,100):
+                timeInfo = testK8sNetwork(func1=str(i),func2=str(i),podNum=podnum,netControlSwitch=0)
+                insertResult("Bandwith",timeInfo)
+        except:
+            createlog(name='Bandwith test Error',error=[traceback.format_exc()])
+        #################test delay
+        try:
+            createDB("netDelay",'delayTime(ms)','ReadyToNotReady(s)','NotReadyToReady(s)','CreatePodTime','sysTime')
+            for i in xrange(50,1500,50):
+                timeInfo = testK8sNetwork(func1='delay',func2=str(i)+'ms',podNum=podnum)
+                insertResult("netDelay",timeInfo)
+        except:
+            createlog(name='netDalay test Error',error=[traceback.format_exc()])
         #################################################
-    createDB("netCorrupt",'delayTime(ms)','ReadyToNotReady(s)','NotReadyToReady(s)','CreatePodTime','sysTime')
+        try:
+            createDB("netLoss",'delayTime(ms)','ReadyToNotReady(s)','NotReadyToReady(s)','CreatePodTime','sysTime')
+            for i in xrange(0,60,5):
+                timeInfo = testK8sNetwork(func1='loss',func2=str(i)+'%',podNum=podnum)
+                insertResult("netLoss",timeInfo)
+        except:
+            createlog(name='netLoss test Error',error=[traceback.format_exc()])
+        #################################################
+    '''createDB("netCorrupt",'delayTime(ms)','ReadyToNotReady(s)','NotReadyToReady(s)','CreatePodTime','sysTime')
     for i in xrange(0,50,5):
         timeInfo = testK8sNetwork(func1='corrupt',func2=str(i)+'%')
         insertResult("netCorrupt",timeInfo)
@@ -260,10 +317,7 @@ if __name__=='__main__':
     for i in xrange(0,50,5):
         timeInfo = testK8sNetwork(func1='duplicate',func2=str(i)+'%')
         insertResult("netDuplicate",timeInfo)'''
-    createDB("Bandwith",'Bandwith(upload/download)','ReadyToNotReady(s)','NotReadyToReady(s)','CreatePodTime','sysTime')
-    for i in xrange(100,1500,100):
-        timeInfo = testK8sNetwork(func1=str(i),func2=str(i),podNum=1,netControlSwitch=0)
-        insertResult("Bandwith",timeInfo)
+
 
 
     set_nodeStatus(MASTERIP)
