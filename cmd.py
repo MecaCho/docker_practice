@@ -127,7 +127,7 @@ def createPod(masterIP,podNum=1,rcName='nginx'):
     shell_exc("kubectl -s http://"+masterIP+":8080 "+"scale rc "+rcName+" --replicas="+str(podNum))
     podStatusInfo = filter(lambda x:x!="Running",get_podStatus(MASTERIP,NODEIP))
     while podStatusInfo:
-        if filter(lambda x:x=="ImagePullBackOff",get_podStatus(MASTERIP,NODEIP)):
+        if filter(lambda x:x=="ImagePullBackOff" or x=='ErrImagePull',get_podStatus(MASTERIP,NODEIP)):
             stdout = shell_exc("kubectl -s http://"+masterIP+":8080 get pod -o wide")
             podName = search_str(stdout,"ImagePullBackOff",loc=-2)
             optemp_ = "kubectl -s http://"+masterIP+":8080 delete pods "+podName[0]
@@ -266,11 +266,11 @@ def testK8sNetwork(func1='delay',func2="200ms",podNum=1,netControlSwitch = 1):
             timeinfo = []
             totalTime = reduce(lambda x,y:x+y,map(lambda x:datetime.strptime(x,"%H:%M:%S")-datetime.strptime("0:0:0","%H:%M:%S"),allPodLostTime))
             avgTime = (datetime.strptime(str(totalTime),"%H:%M:%S")-datetime.strptime("0:0:0","%H:%M:%S"))/podNum
-            timeinfo.append(avgTime)
+            timeinfo.append(str(avgTime))
             maxTime = max(allPodLostTime)
-            timeinfo.append(maxTime)
+            timeinfo.append(str(maxTime))
             minTime = min(allPodLostTime)
-            timeinfo.append(minTime)
+            timeinfo.append(str(minTime))
             detailTime ='('+ '*'.join(allPodLostTime)+')'
             timeinfo.append(detailTime)
             timeInfo.append('$$'.join(timeinfo))
